@@ -1,0 +1,4 @@
+# Projekt-CMakeLists: diese drei Zeilen braucht jedes ESP-IDF-Projekt
+cmake_minimum_required(VERSION 3.16)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(sensor_bay)
