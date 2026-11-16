@@ -1,9 +1,9 @@
 /*
- * Lab 07 - Deep Sleep und RTC-Speicher (Step 1)
+ * Lab 07 - Deep Sleep und RTC-Speicher (Step 2)
  *
- * Nach 10 s ohne Bewegung -> Deep Sleep.
- * Aufwachen durch Timer (30 s) oder Radar, jedes Aufwachen ist ein Neustart.
- * In Step 1 startet jedes Aufwachen Display und Tasks wie in Lab 06.
+ * Start durch Reset / Radar: Display + Tasks wie in Lab 06,
+ *                            nach 10 s ohne Bewegung -> Deep Sleep
+ * Start durch Timer (30 s):  einmal messen, im RTC-Log speichern, wieder schlafen
  */
 
 #include <stdio.h>
@@ -233,6 +233,27 @@ static void enter_deep_sleep(void)
     esp_deep_sleep_start();     // kehrt nicht zurueck
 }
 
+// einmal messen und ins RTC-Log schreiben (Timer-Wakeup)
+static void measure_once(void)
+{
+    float temperature = 0, humidity = 0;
+    uint32_t temp_raw, hum_raw;
+    int battery_mv = 0;
+
+    esp_err_t aht_err = aht20_read_temperature_humidity(g_aht20, &temp_raw, &temperature,
+                                                        &hum_raw, &humidity);
+    if (aht_err != ESP_OK) {
+        ESP_LOGW(TAG, "AHT20 Fehler, nichts gespeichert");
+        return;
+    }
+    if (battery_read_mv(&battery_mv) != ESP_OK) {
+        battery_mv = 0;
+    }
+    int motion = gpio_get_level(RADAR_PIN);
+
+    rtc_log_add_values(temperature, humidity, battery_mv, motion);
+}
+
 /* ---------- Display ---------- */
 
 static void ui_init(void)
@@ -364,12 +385,14 @@ void app_main(void)
 {
     // Warum ist der Chip gestartet?
     const uint32_t wakeup_causes = esp_sleep_get_wakeup_causes();
-    const bool woken_by_radar = wakeup_causes & BIT(ESP_SLEEP_WAKEUP_EXT0);
+    bool woken_by_radar = wakeup_causes & BIT(ESP_SLEEP_WAKEUP_EXT0);
     const bool woken_by_timer = wakeup_causes & BIT(ESP_SLEEP_WAKEUP_TIMER);
     // keins von beiden: Power-on oder Reset
 
     boot_count++;
     rtc_boot_count++;
+
+    rtc_log_check();
 
     // I2C-Busse ueber das BSP anlegen (ohne Display), AHT20 benutzt den Dock-Bus mit
     ESP_ERROR_CHECK(bsp_i2c_init());
@@ -377,6 +400,16 @@ void app_main(void)
     battery_init();
 
     radar_gpio_init();
+
+    // Timer-Wakeup: nur messen und wieder schlafen
+    if (woken_by_timer) {
+        measure_once();
+        if (gpio_get_level(RADAR_PIN) == 0) {
+            enter_deep_sleep();
+        }
+        // Radar ist HIGH -> jemand steht davor -> weiter wie nach Radar-Wakeup
+        woken_by_radar = true;
+    }
 
     g_readings_mutex = xSemaphoreCreateMutex();
     assert(g_readings_mutex != NULL);
@@ -405,6 +438,7 @@ void app_main(void)
     // USB-Konsole braucht nach dem Aufwachen 1-2 s, sonst fehlen die Zeilen
     vTaskDelay(pdMS_TO_TICKS(2000));
     ESP_LOGI(TAG, "Wakeup: %s | boot_count=%d | rtc_boot_count=%d",
-             woken_by_radar ? "Radar (EXT0)" : (woken_by_timer ? "Timer" : "Power-on/Reset"),
+             woken_by_timer ? "Timer (Radar HIGH)" : (woken_by_radar ? "Radar (EXT0)" : "Power-on/Reset"),
              boot_count, rtc_boot_count);
+    rtc_log_print(10);
 }

@@ -1,0 +1,23 @@
+Für die zeit, in der die Box abgedeckt war, ist dieser kurze Block wichtig. Er steht in 15-mal hintereinander, einmal pro Timer-Aufwachen:
+
+I (1262) main_task: Calling app_main()
+I (1266) i2c_bus: I2C Bus V2 uses the externally initialized bus handle
+I (1387) lab06: Gehe in Deep Sleep (Timer 30 s oder Radar)
+--- ERROR: ClearCommError failed (PermissionError(13, ...))
+--- Waiting for the device to reconnect.....
+
+I (3496) lab06: Wakeup: Radar (EXT0) | boot_count=1 | rtc_boot_count=17
+I (3496) rtc_log: 15 entries stored, 15 measurements in total, newest 10:
+I (3498) rtc_log:   #5     t=       203 s  23.43 degC  47.25 %  motion: 0  battery: 0 mV
+I (3514) rtc_log:   #6     t=       235 s  23.39 degC  47.37 %  motion: 0  battery: 0 mV
+I (3518) rtc_log:   #7     t=       266 s  23.33 degC  47.41 %  motion: 0  battery: 0 mV
+I (3526) rtc_log:   #8     t=       298 s  23.30 degC  47.41 %  motion: 0  battery: 0 mV
+I (3533) rtc_log:   #9     t=       329 s  23.27 degC  47.39 %  motion: 0  battery: 0 mV
+I (3541) rtc_log:   #10    t=       360 s  23.22 degC  47.53 %  motion: 0  battery: 0 mV
+I (3549) rtc_log:   #11    t=       392 s  23.18 degC  47.57 %  motion: 0  battery: 0 mV
+I (3557) rtc_log:   #12    t=       423 s  23.14 degC  47.63 %  motion: 0  battery: 0 mV
+I (3565) rtc_log:   #13    t=       455 s  23.11 degC  47.65 %  motion: 0  battery: 0 mV
+I (3573) rtc_log:   #14    t=       486 s  23.07 degC  47.70 %  motion: 0  battery: 0 mV
+
+nach reset:
+ I (3495) rtc_log: 0 entries stored, 0 measurements in total, newest 0:
