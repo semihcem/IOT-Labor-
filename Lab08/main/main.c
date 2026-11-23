@@ -1,13 +1,15 @@
 /*
- * Lab 08 - Cloud-Anbindung mit ESP RainMaker (Step 1)
+ * Lab 08 - Cloud-Anbindung mit ESP RainMaker (Step 2)
  *
  * Basis: Lab 07 (Deep Sleep, Timer-Wakeup alle 30 s, RTC-Log)
- * Step 1: RainMaker-Komponenten, Partitionstabelle, NVS - RainMaker wird noch nicht gestartet
+ * Step 1: RainMaker-Komponenten, Partitionstabelle, NVS
+ * Step 2: Provisioning per QR-Code, Geraet "Climate", cloud_task
  */
 
 #include <stdio.h>
 #include <stdbool.h>
 #include <assert.h>
+#include <math.h>              // lroundf()
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -28,6 +30,11 @@
 #include "aht20.h"
 #include "rtc_log.h"
 #include "cloud_port.h"           // nach rtc_log.h
+#include "esp_rmaker_core.h"
+#include "esp_rmaker_standard_types.h"
+#include "esp_rmaker_standard_params.h"
+#include "app_network.h"
+#include "app_reset.h"
 
 #define I2C_SCL_PIN            40
 #define I2C_SDA_PIN            41
@@ -79,6 +86,11 @@ static adc_cali_handle_t g_adc_cali;
 
 static lv_obj_t *g_label;
 static lv_obj_t *g_battery_label;
+
+// RainMaker-Params des Geraets "Climate" (in Step 3 fuer den Upload gebraucht)
+static esp_rmaker_param_t *g_temp_param;
+static esp_rmaker_param_t *g_hum_param;
+static esp_rmaker_param_t *g_bat_param;
 
 static int boot_count = 0;                      // normaler RAM
 RTC_DATA_ATTR static int rtc_boot_count = 0;    // RTC slow memory
@@ -255,6 +267,112 @@ static void measure_once(void)
     rtc_log_add_values(temperature, humidity, battery_mv, motion);
 }
 
+/* ---------- Cloud (RainMaker) ---------- */
+
+#define CLOUD_TIMEOUT_MS  30000     // timer mode: max. time for Wi-Fi + MQTT + time sync
+
+// Newest measurement: start value of the params (instead of 0)
+static measurement_t newest_measurement(void)
+{
+    measurement_t m = {0};
+    if (rtc_log_get(rtc_log_total() - 1, &m)) {
+        return m;                           // newest entry of the log
+    }
+    // log empty (after power-on / RESET): measure now.
+    // cloud_start() runs in app_main() before sensor_task exists -> no mutex needed
+    uint32_t temperature_raw, humidity_raw;
+    float temperature, humidity;
+    int battery_mv = 0;
+    if (aht20_read_temperature_humidity(g_aht20, &temperature_raw, &temperature,
+                                        &humidity_raw, &humidity) == ESP_OK) {
+        m.temp_x100 = (int16_t) lroundf(temperature * 100.0f);
+        m.hum_x100 = (uint16_t) lroundf(humidity * 100.0f);
+    }
+    if (battery_read_mv(&battery_mv) == ESP_OK) {
+        m.battery_mv = (uint16_t) battery_mv;
+    }
+    return m;
+}
+
+// Ein Job: verbinden (oder Provisioning), auf MQTT warten, beenden.
+static void cloud_task(void *pvParameters)
+{
+    // blockiert, bis die Box online ist: mit gespeicherten WLAN-Daten oder nach dem Provisioning
+    if (app_network_start(POP_TYPE_RANDOM) == ESP_OK) {
+        cloud_port_qr_hide();
+        s_cloud.cloud_ready = 1;            // WLAN-Daten bekannt
+
+        // auf die MQTT-Verbindung warten, hoechstens bis zur gemeinsamen Deadline
+        EventBits_t bits = xEventGroupWaitBits(g_cloud_events, MQTT_CONNECTED_BIT, pdFALSE, pdTRUE,
+                                               cloud_ticks_left());
+        if (bits & MQTT_CONNECTED_BIT) {
+            ESP_LOGI(TAG, "Cloud: online");
+        } else {
+            ESP_LOGW(TAG, "No MQTT connection before the deadline");
+        }
+    }
+    xEventGroupClearBits(g_cloud_events, CLOUD_BUSY_BIT);  // power_task darf wieder schlafen
+    xEventGroupSetBits(g_cloud_events, SYNC_DONE_BIT);      // Job erledigt
+    vTaskDelete(NULL);                      // a task must never simply return
+}
+
+static void cloud_start(bool with_display)
+{
+    xEventGroupSetBits(g_cloud_events, CLOUD_BUSY_BIT);    // do not sleep until cloud_task is done
+    // one deadline for the whole cloud job: with display, the user may need the full
+    // provisioning time; in timer mode nobody is waiting
+    cloud_deadline_set(with_display ? PROV_TIMEOUT_MS + CLOUD_TIMEOUT_MS : CLOUD_TIMEOUT_MS);
+    // every time-series report logs one INFO line with JSON (Step 3) -> warnings only
+    esp_log_level_set("esp_rmaker_param", ESP_LOG_WARN);
+
+    app_network_init();                     // Wi-Fi + provisioning, creates the default event loop
+    // in former releases, app_network_init() was also called app_wifi_init()
+    esp_rmaker_config_t rainmaker_cfg = {
+        .enable_time_sync = true,           // SNTP: Unix timestamps for the upload (Step 3)
+    };
+    esp_rmaker_node_t *node = esp_rmaker_node_init(&rainmaker_cfg, "IoT Lab Box", "Sensor");
+    assert(node != NULL);
+
+    // start values of the params = newest measurement (not 0, see the note above)
+    const measurement_t last = newest_measurement();
+
+    // Geraet "Climate" mit Name-Param und drei Params (nur lesen, Verlauf in der Cloud)
+    esp_rmaker_device_t *device = esp_rmaker_device_create("Climate", ESP_RMAKER_DEVICE_TEMP_SENSOR, NULL);
+    assert(device != NULL);
+    esp_rmaker_device_add_param(device, esp_rmaker_name_param_create(ESP_RMAKER_DEF_NAME_PARAM, "Climate"));
+
+    g_temp_param = esp_rmaker_param_create("Temperature", ESP_RMAKER_PARAM_TEMPERATURE,
+                       esp_rmaker_float(last.temp_x100 / 100.0f),
+                       PROP_FLAG_READ | PROP_FLAG_SIMPLE_TIME_SERIES);
+    esp_rmaker_param_add_ui_type(g_temp_param, ESP_RMAKER_UI_TEXT);
+    esp_rmaker_device_add_param(device, g_temp_param);
+
+    g_hum_param = esp_rmaker_param_create("Humidity", "custom.param.humidity",
+                      esp_rmaker_float(last.hum_x100 / 100.0f),
+                      PROP_FLAG_READ | PROP_FLAG_SIMPLE_TIME_SERIES);
+    esp_rmaker_param_add_ui_type(g_hum_param, ESP_RMAKER_UI_TEXT);
+    esp_rmaker_device_add_param(device, g_hum_param);
+
+    g_bat_param = esp_rmaker_param_create("Battery", "custom.param.battery-mv",
+                      esp_rmaker_int(last.battery_mv),
+                      PROP_FLAG_READ | PROP_FLAG_SIMPLE_TIME_SERIES);
+    esp_rmaker_param_add_ui_type(g_bat_param, ESP_RMAKER_UI_TEXT);
+    esp_rmaker_device_add_param(device, g_bat_param);
+
+    esp_rmaker_device_assign_primary_param(device, g_temp_param);
+    esp_rmaker_node_add_device(node, device);
+
+    cloud_port_register_events(with_display);   // given: QR code, MQTT_CONNECTED_BIT
+    if (with_display) {
+        // BOOT button: hold 3 s -> forget Wi-Fi (new provisioning), hold 10 s -> factory reset
+        app_reset_button_register(app_reset_button_create(BSP_BUTTON_CONFIG_IO, 0), 3, 10);
+    }
+    ESP_ERROR_CHECK(esp_rmaker_start());    // starts the RainMaker agent (connects once Wi-Fi is up)
+
+    BaseType_t ok = xTaskCreate(cloud_task, "Cloud", 6144, NULL, 2, NULL);   // lowest priority
+    assert(ok == pdPASS);
+}
+
 /* ---------- Display ---------- */
 
 static void ui_init(void)
@@ -371,6 +489,10 @@ static void power_task(void *arg)
             }
         } else if (gpio_get_level(RADAR_PIN) == 1) {
             // Timeout, aber Person steht still vor der Box -> anlassen
+        } else if ((xEventGroupGetBits(g_cloud_events) & CLOUD_BUSY_BIT) && cloud_ticks_left() > 0) {
+            // Provisioning oder Upload laeuft -> wach bleiben, aber nur bis zur Deadline
+            ESP_LOGI(TAG, "Cloud busy (provisioning/upload) - staying awake for max. %lu s",
+                     (unsigned long) (pdTICKS_TO_MS(cloud_ticks_left()) / 1000));
         } else if (backlight_on) {
             bsp_display_lock(0);
             bsp_display_backlight_off();
@@ -435,6 +557,11 @@ void app_main(void)
     bsp_display_start();
     bsp_display_backlight_on();
     ui_init();
+
+    // nach Power-on/RESET einmal online gehen (QR-Code, falls noch nicht eingerichtet)
+    if (!s_cloud.cloud_ready) {
+        cloud_start(true);
+    }
 
     radar_isr_init();
 
