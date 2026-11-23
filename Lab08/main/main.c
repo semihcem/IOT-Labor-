@@ -1,9 +1,10 @@
 /*
- * Lab 08 - Cloud-Anbindung mit ESP RainMaker (Step 2)
+ * Lab 08 - Cloud-Anbindung mit ESP RainMaker (Step 3)
  *
  * Basis: Lab 07 (Deep Sleep, Timer-Wakeup alle 30 s, RTC-Log)
  * Step 1: RainMaker-Komponenten, Partitionstabelle, NVS
  * Step 2: Provisioning per QR-Code, Geraet "Climate", cloud_task
+ * Step 3: RTC-Log mit Original-Zeitstempeln hochladen
  */
 
 #include <stdio.h>
@@ -35,6 +36,7 @@
 #include "esp_rmaker_standard_params.h"
 #include "app_network.h"
 #include "app_reset.h"
+#include "esp_rmaker_time_sync.h"
 
 #define I2C_SCL_PIN            40
 #define I2C_SDA_PIN            41
@@ -51,6 +53,11 @@
 #define DISPLAY_PERIOD_MS      500
 #define INACTIVITY_TIMEOUT_MS  10000
 #define MEASURE_INTERVAL_S     30
+
+#define MAX_UPLOAD_PER_SYNC   25      // 3 MQTT messages per entry -> 75 of 100 budget tokens
+#define UPLOAD_EVERY_N        20      // Step 4: connect after 20 new measurements (= 10 min)
+#define CLOUD_FLUSH_MS        2000    // Step 4: give the MQTT client time to send before sleeping
+#define CLOUD_GRACE_MS        3000    // Step 4: an upload started just before the deadline may finish
 
 #define TASK_STACK_SIZE        4096
 #define POWER_TASK_PRIO        5
@@ -294,26 +301,80 @@ static measurement_t newest_measurement(void)
     return m;
 }
 
-// Ein Job: verbinden (oder Provisioning), auf MQTT warten, beenden.
+// Uploads up to MAX_UPLOAD_PER_SYNC measurements that are not in the cloud yet, oldest first,
+// with their original timestamps (RainMaker "simple time series").
+// Returns the number of uploaded entries.
+static int cloud_sync(void)
+{
+    cloud_time_update();                    // given: store the clock jump if it happened in this boot
+    const uint32_t total = rtc_log_total();
+    const uint32_t pending = total - s_cloud.uploaded_total;
+    int uploaded = 0;
+
+    // oldest first, at most MAX_UPLOAD_PER_SYNC entries (MQTT budget, the rest follows next time)
+    while (s_cloud.uploaded_total < total && uploaded < MAX_UPLOAD_PER_SYNC) {
+        measurement_t m;
+        const bool exists = rtc_log_get(s_cloud.uploaded_total, &m);
+        // Unix timestamp of the entry (0 = unknown). The RainMaker API expects an int.
+        const int ts = exists ? (int) entry_unix_time(&m) : 0;
+        if (ts == 0) {
+            s_cloud.uploaded_total++;       // overwritten or no valid time: can never be uploaded
+            continue;
+        }
+
+        esp_err_t err = ESP_OK;
+        // die drei Werte mit dem Zeitstempel ts senden, den naechsten nur wenn der vorige ging
+        err = esp_rmaker_param_report_simple_ts_data(g_temp_param, esp_rmaker_float(m.temp_x100 / 100.0f), ts, 0);
+        if (err == ESP_OK) {
+            err = esp_rmaker_param_report_simple_ts_data(g_hum_param, esp_rmaker_float(m.hum_x100 / 100.0f), ts, 0);
+        }
+        if (err == ESP_OK && m.battery_mv != 0) {      // 0 mV = nicht gemessen -> weglassen
+            err = esp_rmaker_param_report_simple_ts_data(g_bat_param, esp_rmaker_int(m.battery_mv), ts, 0);
+        }
+
+        if (err != ESP_OK) {
+            // e.g. MQTT disconnected or budget used up: do NOT count this entry,
+            // it is retried at the next connection (never lose a measurement)
+            ESP_LOGW(TAG, "Upload stopped: %s", esp_err_to_name(err));
+            break;
+        }
+        s_cloud.uploaded_total++;           // only now the entry counts as "in the cloud"
+        uploaded++;
+    }
+    if (uploaded > 0) {
+        esp_rmaker_report_updated_params(); // dashboard: show the newest values in the app
+    }
+    ESP_LOGI(TAG, "Uploaded %d of %lu pending measurements", uploaded, (unsigned long) pending);
+    return uploaded;
+}
+
+// One job: connect (or provision), upload the new log entries, end.
 static void cloud_task(void *pvParameters)
 {
-    // blockiert, bis die Box online ist: mit gespeicherten WLAN-Daten oder nach dem Provisioning
+    // blocks until the box is online: with the stored Wi-Fi credentials, or after provisioning
     if (app_network_start(POP_TYPE_RANDOM) == ESP_OK) {
         cloud_port_qr_hide();
-        s_cloud.cloud_ready = 1;            // WLAN-Daten bekannt
+        s_cloud.cloud_ready = 1;            // Wi-Fi credentials known: timer wake-ups may go online
 
-        // auf die MQTT-Verbindung warten, hoechstens bis zur gemeinsamen Deadline
+        // wait for the MQTT connection, at most until the common deadline
         EventBits_t bits = xEventGroupWaitBits(g_cloud_events, MQTT_CONNECTED_BIT, pdFALSE, pdTRUE,
                                                cloud_ticks_left());
-        if (bits & MQTT_CONNECTED_BIT) {
-            ESP_LOGI(TAG, "Cloud: online");
+
+        // nur hochladen, wenn MQTT verbunden UND die Uhr synchronisiert ist
+        if ((bits & MQTT_CONNECTED_BIT) && esp_rmaker_time_wait_for_sync(cloud_ticks_left()) == ESP_OK) {
+            if (cloud_sync() > 0) {
+                // (Step 4) RainMaker sends with QoS 1: give the broker time to confirm
+                vTaskDelay(pdMS_TO_TICKS(CLOUD_FLUSH_MS));
+            }
+            // (Step 4) next batch upload after UPLOAD_EVERY_N further measurements
+            s_cloud.next_upload_at = rtc_log_total() + UPLOAD_EVERY_N;
         } else {
-            ESP_LOGW(TAG, "No MQTT connection before the deadline");
+            ESP_LOGW(TAG, "No MQTT connection or time sync before the deadline");
         }
     }
-    xEventGroupClearBits(g_cloud_events, CLOUD_BUSY_BIT);  // power_task darf wieder schlafen
-    xEventGroupSetBits(g_cloud_events, SYNC_DONE_BIT);      // Job erledigt
-    vTaskDelete(NULL);                      // a task must never simply return
+    xEventGroupClearBits(g_cloud_events, CLOUD_BUSY_BIT);  // only AFTER the upload: power_task may sleep again
+    xEventGroupSetBits(g_cloud_events, SYNC_DONE_BIT);      // app_main may sleep (timer mode, Step 4)
+    vTaskDelete(NULL);                      // job done (a task must never simply return)
 }
 
 static void cloud_start(bool with_display)
@@ -579,4 +640,6 @@ void app_main(void)
              woken_by_timer ? "Timer (Radar HIGH)" : (woken_by_radar ? "Radar (EXT0)" : "Power-on/Reset"),
              boot_count, rtc_boot_count);
     rtc_log_print(10);
+    ESP_LOGI(TAG, "Cloud: %lu of %lu measurements uploaded",
+             (unsigned long) s_cloud.uploaded_total, (unsigned long) rtc_log_total());
 }
