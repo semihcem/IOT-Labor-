@@ -1,0 +1,9 @@
+# Name,          Type, SubType, Offset,   Size,     Flags
+# ESP32-S3-BOX-3: 16 MB flash. Offsets of the app partitions must be 64 KB aligned.
+esp_secure_cert, 0x3F, ,        0xD000,   0x2000,   encrypted
+nvs,             data, nvs,     0x10000,  0x6000,
+otadata,         data, ota,     ,         0x2000,
+phy_init,        data, phy,     ,         0x1000,
+ota_0,           app,  ota_0,   0x20000,  4M,
+ota_1,           app,  ota_1,   ,         4M,
+fctry,           data, nvs,     ,         0x6000,

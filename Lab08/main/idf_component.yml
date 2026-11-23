@@ -1,0 +1,12 @@
+## Abhaengigkeiten fuer den IDF Component Manager
+## (entsteht durch "idf.py add-dependency ...")
+dependencies:
+  idf: ">=5.4"
+  # Board Support Package ESP32-S3-BOX-3 (Display, LVGL, I2C)
+  espressif/esp-box-3: "^3.2.1"
+  # Treiber fuer den AHT-Temperatur-/Feuchtesensor (funktioniert auch mit AHT30)
+  espressif/aht20: "^2.0.0"
+  # Lab 08: ESP RainMaker
+  espressif/esp_rainmaker: "^1.17.0"
+  espressif/rmaker_app_network: "^1.4.5"
+  espressif/rmaker_app_reset: "^1.0.0"

@@ -1,0 +1,57 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# 16 MB flash + custom partition table
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0xC000
+
+# 16 MB octal PSRAM of the BOX-3: Wi-Fi + BLE + TLS + LVGL need more than the internal RAM
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# BLE provisioning with the NimBLE stack
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+# user-node mapping signs the challenge with ECDSA in the nimble_host task -> 4 KB overflows
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# TLS: allocate buffers only when needed
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+
+# Provisioning stops after 3 min without a phone -> the box may go back to deep sleep
+# (cloud_port.h uses this value for the display-mode deadline, it must be > 0)
+CONFIG_APP_NETWORK_PROV_TIMEOUT_PERIOD=3
+
+# LVGL: QR code widget for the provisioning QR code on the display
+CONFIG_LV_USE_QRCODE=y
+
+# Free internal RAM for the BT controller (it cannot use PSRAM):
+# draw buffer 320x20 instead of 320x100 lines (~51 KB less internal DMA RAM),
+# LVGL uses malloc instead of a fixed 64 KB internal pool (large blocks go to PSRAM)
+CONFIG_BSP_LCD_DRAW_BUF_HEIGHT=20
+CONFIG_LV_USE_CLIB_MALLOC=y
+
+# Recommended by the RainMaker examples
+CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=3120
+CONFIG_ESP_RMAKER_USER_ID_CHECK=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# ---- aus unserem Lab-07-Projekt uebernommen ----
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
+CONFIG_LV_CONF_SKIP=y
+CONFIG_LV_BUILD_EXAMPLES=n
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_USE_CLIB_STRING=y
+# Schriften fuer Titel und Werte (sonst Build-Fehler bei lv_font_montserrat_20/28)
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y

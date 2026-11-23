@@ -1,0 +1,16 @@
+
+Vorhersage
+
+Moment								Weckgrund			boot_count			rtc_boot_count
+direkt nach dem Flashen						Power-on/Reset			1				1
+Box in Ruhe gelassen, wacht von selbst auf			Timer				1				2
+schläft wieder ein, du weckst sie durch Bewegung		Radar (EXT0)			1				3
+nach Drücken von RESET						Power-on/Reset			1	
+
+Echt
+
+
+I (3493) lab06: Wakeup: Power-on/Reset | boot_count=1 | rtc_boot_count=1
+I (3498) lab06: Wakeup: Timer | boot_count=1 | rtc_boot_count=2
+I (3498) lab06: Wakeup: Timer | boot_count=1 | rtc_boot_count=3
+I (3498) lab06: Wakeup: Power-on/Reset | boot_count=1 | rtc_boot_count=1
