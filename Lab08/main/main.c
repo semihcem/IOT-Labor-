@@ -1,10 +1,11 @@
 /*
- * Lab 08 - Cloud-Anbindung mit ESP RainMaker (Step 3)
+ * Lab 08 - Cloud-Anbindung mit ESP RainMaker (Step 4)
  *
  * Basis: Lab 07 (Deep Sleep, Timer-Wakeup alle 30 s, RTC-Log)
  * Step 1: RainMaker-Komponenten, Partitionstabelle, NVS
  * Step 2: Provisioning per QR-Code, Geraet "Climate", cloud_task
  * Step 3: RTC-Log mit Original-Zeitstempeln hochladen
+ * Step 4: Store-and-Forward - WLAN nur alle 20 Messungen
  */
 
 #include <stdio.h>
@@ -238,6 +239,9 @@ static void radar_isr_init(void)
 
 static void enter_deep_sleep(void)
 {
+    cloud_time_update();    // remember a clock jump (s_boot_rel_us is lost in deep sleep)
+    cloud_wifi_stop();      // switch the radio off in an orderly way
+
     ESP_LOGI(TAG, "Gehe in Deep Sleep (Timer %d s oder Radar)", MEASURE_INTERVAL_S);
 
     esp_sleep_enable_timer_wakeup(MEASURE_INTERVAL_S * 1000000ULL);   // Zeit in us
@@ -595,13 +599,30 @@ void app_main(void)
 
     radar_gpio_init();
 
-    // Timer-Wakeup: nur messen und wieder schlafen
+    // Timer wakeup: measure once and sleep again - display stays off, no tasks started
     if (woken_by_timer) {
         measure_once();
         if (gpio_get_level(RADAR_PIN) == 0) {
-            enter_deep_sleep();
+            // Lab 08: store-and-forward - only every UPLOAD_EVERY_N measurements switch on the radio
+            if (s_cloud.cloud_ready && rtc_log_total() >= s_cloud.next_upload_at) {
+                // set the next upload point already now: if this attempt fails (no Wi-Fi),
+                // the next attempt comes only after UPLOAD_EVERY_N further measurements (back-off)
+                s_cloud.next_upload_at = rtc_log_total() + UPLOAD_EVERY_N;
+                ESP_LOGI(TAG, "Batch upload: %lu measurements pending",
+                         (unsigned long) (rtc_log_total() - s_cloud.uploaded_total));
+                cloud_start(false);         // no QR code, no BOOT button, deadline CLOUD_TIMEOUT_MS
+
+                // auf das Ende des Uploads warten - nie ohne Timeout
+                EventBits_t bits = xEventGroupWaitBits(g_cloud_events, SYNC_DONE_BIT, pdFALSE, pdTRUE,
+                                       cloud_ticks_left() + pdMS_TO_TICKS(CLOUD_FLUSH_MS + CLOUD_GRACE_MS));
+                if (!(bits & SYNC_DONE_BIT)) {
+                    ESP_LOGW(TAG, "Upload timeout - retrying after %d measurements", UPLOAD_EVERY_N);
+                }
+            }
+            enter_deep_sleep();             // does not return
         }
-        // Radar ist HIGH -> jemand steht davor -> weiter wie nach Radar-Wakeup
+        // radar is active right now: continue as if woken up by motion
+        ESP_LOGI(TAG, "Motion during measurement - starting display");
         woken_by_radar = true;
     }
 
